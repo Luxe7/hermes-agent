@@ -30,9 +30,23 @@ def test_resolution_reports_unavailable_without_installing(no_faster_whisper):
     assert attempts == []
 
 
-def test_transcription_is_what_installs(no_faster_whisper):
+@pytest.mark.parametrize("action", ["transcribe", "warm"])
+def test_explicit_local_actions_reach_lazy_install(
+    no_faster_whisper, monkeypatch, tmp_path, action,
+):
+    from tools.stt_lease import warm_stt_provider
+
     tools, attempts = no_faster_whisper
-    result = tools._transcribe_local("/tmp/absent.wav", "base")
-    assert attempts == [1], "the action path lost its on-demand install"
-    assert result["success"] is False
+    monkeypatch.setattr(tools, "_load_stt_config", lambda: {"provider": "local"})
+    monkeypatch.setattr("tools.tool_backend_helpers.read_selection", lambda _: "local")
+    audio = tmp_path / "voice.wav"
+    audio.write_bytes(b"RIFF" + bytes(4) + b"WAVE")
+
+    if action == "transcribe":
+        result = tools.transcribe_audio(str(audio))
+        assert result["success"] is False
+    else:
+        result = warm_stt_provider()
+        assert result["action"] == "error"
+    assert attempts == [1]
     assert "faster-whisper not installed" in result["error"]
