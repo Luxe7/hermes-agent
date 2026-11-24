@@ -246,7 +246,7 @@ def _resolve_explicit_provider(provider: str) -> str:
     return "none"
 
 
-def _get_provider(stt_config: dict) -> str:
+def _get_provider(stt_config: dict, *, for_action: bool = False) -> str:
     """Which STT provider to use: an explicit ``stt.provider`` is honoured (no silent cloud
     fallback); otherwise auto-detect local > groq > openai > mistral > xai > elevenlabs > deepinfra."""
     if not is_stt_enabled(stt_config):
@@ -265,6 +265,9 @@ def _get_provider(stt_config: dict) -> str:
                 explicit = False
         except Exception:  # pragma: no cover — helpers are in-repo
             pass
+    if explicit and provider == "local" and for_action:
+        # Keep an installed CLI fallback. Otherwise let the action reach Whisper's lazy setup.
+        return _detect_local_backend() or "local"
     if explicit:
         return _resolve_explicit_provider(provider)
     backend = _detect_local_backend()
@@ -443,7 +446,7 @@ def _transcribe_prepared_audio(
     stt_config = _load_stt_config()
     if not is_stt_enabled(stt_config):
         return _error_result("STT is disabled in config.yaml (stt.enabled: false).")
-    provider = _get_provider(stt_config)
+    provider = _get_provider(stt_config, for_action=True)
     remote = not _is_local_stt_provider(provider)
     with ExitStack() as cleanup:
         # Never overwrite a neighboring WAV or leave converted voice notes behind.

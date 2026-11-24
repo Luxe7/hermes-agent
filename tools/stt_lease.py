@@ -46,7 +46,7 @@ def warm_stt_provider(
 
     if stt_config is None:
         stt_config = transcription_tools._load_stt_config()
-    name = (provider or transcription_tools._get_provider(stt_config) or "").lower().strip()
+    name = (provider or transcription_tools._get_provider(stt_config, for_action=True) or "").lower().strip()
     result: dict[str, Any] = {"provider": name, "warmed": False, "action": "noop"}
     if name not in {"local", "local_command"}:
         return result
