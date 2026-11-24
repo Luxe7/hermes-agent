@@ -64,7 +64,7 @@ def _local_cfg(monkeypatch, model="tiny"):
         transcription_tools, "_load_stt_config", lambda: {"local": {"model": model}}
     )
     # Explicit local provider without going through the selection-file probe.
-    monkeypatch.setattr(transcription_tools, "_get_provider", lambda cfg: "local")
+    monkeypatch.setattr(transcription_tools, "_get_provider", lambda cfg, **_: "local")
 
 
 def test_active_acquires_and_warms(client, monkeypatch):
@@ -182,7 +182,7 @@ def test_warm_is_noop_for_cloud_providers(monkeypatch):
     from tools import stt_lease, transcription_tools
 
     monkeypatch.setattr(transcription_tools, "_load_stt_config", lambda: {"provider": "openai"})
-    monkeypatch.setattr(transcription_tools, "_get_provider", lambda cfg: "openai")
+    monkeypatch.setattr(transcription_tools, "_get_provider", lambda cfg, **_: "openai")
     calls = []
     monkeypatch.setattr(
         transcription_tools, "_get_or_load_local_model", lambda name, cfg: calls.append(name)
