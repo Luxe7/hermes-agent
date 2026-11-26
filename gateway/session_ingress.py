@@ -3,7 +3,7 @@ import asyncio
 import logging
 from contextvars import ContextVar
 from contextlib import asynccontextmanager, nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 
 from gateway.platforms.event import MessageEvent, ProcessingOutcome
 from gateway.session_envelope import restore_native
@@ -82,43 +82,72 @@ async def admit_message(authority, event):
         messaging_admission.reset(ingress)
     if receipt.status == 'terminal':
         return None
-    # Only the delivery waiter is process-local; execution reads the committed snapshot.
-    authority.native_waiters.add(receipt.admission_id)
-    waiter = authority.waiters.setdefault(receipt.admission_id, asyncio.get_running_loop().create_future())
+    return await _wait_for_native_reply(authority, event, receipt, accepted)
+
+
+@dataclass
+class _NativeReply:
+    callers: dict[object, MessageEvent] = field(default_factory=dict)
+    delivered: bool = False
+
+
+async def _wait_for_native_reply(authority, event, receipt, accepted):
+    admission_id = receipt.admission_id
+    admissions = authority_persistence(authority).admissions
+    row = admissions.get(admission_id=admission_id)
+    status = 'terminal' if row is None else row.status
+    note_busy_admitted(event, admission_id, status, None if row is None else row.outcome)
+    if status in ('terminal', 'unknown'):
+        return None if status == 'terminal' else pause_notice(authority, receipt.ref, 'unknown_execution')
+
+    # The drain may consume native_waiters when it starts, but redelivered
+    # ingress still joins the same reply until the admission settles.
+    replies = _registry(authority, 'native_replies')
+    reply = replies.get(admission_id)
+    if reply is None:
+        reply = replies[admission_id] = _NativeReply()
+        authority.native_waiters.add(admission_id)
+    caller = object()
+    reply.callers[caller] = event
+    waiter = authority.waiters.setdefault(admission_id, asyncio.get_running_loop().create_future())
     adopters = _marker_adopters(authority)
     if getattr(event, '_turn_marker_handoff', False):
-        # The adapter lifecycle that sends this reply releases the turn's crash marker only once
-        # the reply is in the delivery ledger; the drain hands its marker to this event.
-        adopters[receipt.admission_id] = event
-    # A drain already running can claim, run and settle the row before this caller resumes; one
-    # that settled it already sent (or owes) the reply itself and resolves no waiter registered now.
-    admissions = authority_persistence(authority).admissions
-    row = admissions.get(admission_id=receipt.admission_id)
-    status = 'terminal' if row is None else row.status  # None: deleted with its chat, nothing owed
-    note_busy_admitted(event, receipt.admission_id, status, None if row is None else row.outcome)
-    if status in ('terminal', 'unknown'):
-        authority.native_waiters.discard(receipt.admission_id)
-        if authority.waiters.get(receipt.admission_id) is waiter:
-            del authority.waiters[receipt.admission_id]
-        if adopters.get(receipt.admission_id) is event:
-            del adopters[receipt.admission_id]
-        return None if status == 'terminal' else pause_notice(authority, receipt.ref, 'unknown_execution')
+        adopters.setdefault(admission_id, event)
     if accepted is not None and not accepted.done():
         accepted.set_result(None)
     try:
-        return await asyncio.shield(waiter)
+        response = await asyncio.shield(waiter)
+        if reply.delivered or adopters.get(admission_id, event) is not event:
+            return None
+        reply.delivered = True
+        return response
     except AuthorityRefusal as exc:
-        row = admissions.get(admission_id=receipt.admission_id)
+        row = admissions.get(admission_id=admission_id)
         if row is not None and row.status == 'terminal':
-            # The drain refused this head (``_refuse_head``): cancelled, not saved behind a pause.
+            # The drain refused this head: cancelled, not saved behind a pause.
             return (f'⚠️ Hermes did not answer this message ({exc.reason}): the conversation it was '
                     'queued for moved, so it was dropped. Send it again to continue.')
         if row is not None:
-            note_busy_parked(event)  # still queued (saved): answered after the pause, not dropped
+            note_busy_parked(event)
         return pause_notice(authority, receipt.ref, exc.reason)
     finally:
-        if adopters.get(receipt.admission_id) is event:
-            del adopters[receipt.admission_id]
+        _leave_native_reply(authority, admission_id, reply, caller, event)
+
+
+def _leave_native_reply(authority, admission_id, reply, caller, event):
+    del reply.callers[caller]
+    adopters = _marker_adopters(authority)
+    if adopters.get(admission_id) is event:
+        del adopters[admission_id]
+        if not reply.delivered:
+            for successor in reply.callers.values():
+                if getattr(successor, '_turn_marker_handoff', False):
+                    _move_marker(event, successor)
+                    successor._hermes_run_generation = getattr(event, '_hermes_run_generation', None)
+                    adopters[admission_id] = successor
+                    break
+    if not reply.callers:
+        del _registry(authority, 'native_replies')[admission_id]
 
 
 def _marker_adopters(authority):
